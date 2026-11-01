@@ -1,0 +1,17 @@
+Import styledtext
+
+Sub Main()
+    Dim document As New StyledText("Hello, 世界 😀")
+    Dim emphasis As New TextStyle()
+    emphasis.FontName = "Helvetica"
+    emphasis.FontSize = 13.5
+    emphasis.Bold = True
+    emphasis.Blue = 65535
+    document.SetStyle(7, 2, emphasis)
+    document.Insert(9, "!")
+    Dim saved As Bytes = EncodeStyledText(document)
+    Dim loaded As StyledText = DecodeStyledText(saved)
+    Print loaded.PlainText()
+    Print "Scalars: " + String.From(loaded.Length())
+    Print "Style runs: " + String.From(Array.Count(loaded.Runs()))
+End Sub

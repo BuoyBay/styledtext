@@ -1,0 +1,547 @@
+Private Sub ValidateText(content As String, maxBytes As Integer)
+    Dim data As Bytes = Bytes.FromString(content, Text.Encodings.UTF8)
+    ValidateUTF8(data, maxBytes)
+End Sub
+
+Private Sub ValidateUTF8(data As Bytes, maxBytes As Integer)
+    If data.Count > maxBytes Then Throw New InvalidArgumentException("UTF-8 byte limit exceeded")
+    Dim i As Integer = 0
+    While i < data.Count
+        Dim lead As Integer = data.Item(i)
+        If lead = 0 Then Throw New InvalidArgumentException("NUL is not supported by Buoy text indexing")
+        Dim width As Integer = 1
+        Dim scalar As Integer = lead
+        Dim minimum As Integer = 0
+        If lead >= 194 And lead <= 223 Then
+            width = 2
+            scalar = lead - 192
+            minimum = 128
+        ElseIf lead >= 224 And lead <= 239 Then
+            width = 3
+            scalar = lead - 224
+            minimum = 2048
+        ElseIf lead >= 240 And lead <= 244 Then
+            width = 4
+            scalar = lead - 240
+            minimum = 65536
+        ElseIf lead > 127 Then
+            Throw New InvalidArgumentException("Invalid UTF-8 leading byte")
+        End If
+        If width > data.Count - i Then Throw New InvalidArgumentException("Truncated UTF-8")
+        For j As Integer = 1 To width - 1
+            Dim octet As Integer = data.Item(i + j)
+            If octet < 128 Or octet > 191 Then Throw New InvalidArgumentException("Invalid UTF-8 continuation")
+            scalar = scalar * 64 + octet - 128
+        Next
+        If scalar < minimum Or scalar > 1114111 Or (scalar >= 55296 And scalar <= 57343) Then Throw New InvalidArgumentException("Invalid Unicode scalar")
+        i += width
+    End While
+End Sub
+
+''' Portable attributes. API boundaries copy these mutable values.
+Public Class TextStyle
+    Public Property FontName As String = ""
+    Public Property FontSize As Double = 0.0
+    Public Property Bold As Boolean = False
+    Public Property Italic As Boolean = False
+    Public Property Underline As Boolean = False
+    Public Property Red As Integer = 0
+    Public Property Green As Integer = 0
+    Public Property Blue As Integer = 0
+
+    Public Function Equals(other As TextStyle) As Boolean
+        If other Is Nil Then Return False
+        Return SameStyle(Me, other)
+    End Function
+
+    Public Function Copy() As TextStyle
+        If Not (FontSize >= 0.0 And FontSize <= 1000000.0) Then Throw New InvalidArgumentException("Invalid font size")
+        If Red < 0 Or Red > 65535 Or Green < 0 Or Green > 65535 Or Blue < 0 Or Blue > 65535 Then Throw New InvalidArgumentException("Invalid RGB16 color")
+        ValidateText(FontName, 4096)
+        Return CopyTrustedStyle(Me)
+    End Function
+End Class
+
+' Only private, previously validated values may enter this fast copy path.
+Private Function CopyTrustedStyle(style As TextStyle) As TextStyle
+    Dim copied As New TextStyle()
+    copied.FontName = style.FontName
+    copied.FontSize = style.FontSize
+    copied.Bold = style.Bold
+    copied.Italic = style.Italic
+    copied.Underline = style.Underline
+    copied.Red = style.Red
+    copied.Green = style.Green
+    copied.Blue = style.Blue
+    Return copied
+End Function
+
+Private Function CopyStyle(style As TextStyle) As TextStyle
+    If style Is Nil Then Throw New InvalidArgumentException("Style must not be Nil")
+    Return style.Copy()
+End Function
+
+Private Function SameStyle(a As TextStyle, b As TextStyle) As Boolean
+    Return String.Compare(a.FontName, b.FontName, True) = 0 And a.FontSize = b.FontSize And a.Bold = b.Bold And a.Italic = b.Italic And a.Underline = b.Underline And a.Red = b.Red And a.Green = b.Green And a.Blue = b.Blue
+End Function
+
+''' Snapshot of a positive-length run at a zero-based Unicode scalar offset.
+Public Class StyleRun
+    Public Property Start As Integer = 0
+    Public Property Length As Integer = 0
+    Public Property Style As TextStyle
+End Class
+
+Private Function NewRun(start As Integer, length As Integer, style As TextStyle) As StyleRun
+    Return NewTrustedRun(start, length, CopyStyle(style))
+End Function
+
+Private Function NewTrustedRun(start As Integer, length As Integer, style As TextStyle) As StyleRun
+    Dim copied As New StyleRun()
+    copied.Start = start
+    copied.Length = length
+    copied.Style = CopyTrustedStyle(style)
+    Return copied
+End Function
+
+''' Editing uses Unicode scalar positions, never UTF-8 bytes or grapheme clusters.
+Public Class StyledText
+    Private Property mText As String = ""
+    Private Property mLength As Integer = 0
+    Private Property mDefault As TextStyle
+    Private Property mRuns As Array Of StyleRun = []
+
+    Public Sub Constructor(content As String = "")
+        Initialize(content, New TextStyle())
+    End Sub
+
+    Public Sub Constructor(content As String, style As TextStyle)
+        Initialize(content, style)
+    End Sub
+
+    Private Sub Initialize(content As String, style As TextStyle)
+        ValidateText(content, 4000000)
+        If String.Len(content) > 1000000 Then Throw New InvalidArgumentException("Text exceeds one million scalars")
+        mDefault = CopyStyle(style)
+        mText = content
+        mLength = String.Len(content)
+        If mLength > 0 Then Array.Append(mRuns, NewTrustedRun(0, mLength, mDefault))
+    End Sub
+
+    ''' Build from exact coverage; adjacent equal styles are coalesced.
+    Public Shared Function FromRuns(content As String, runs As Array Of StyleRun, defaultStyle As TextStyle) As StyledText
+        If Array.Count(runs) > 100000 Then Throw New InvalidArgumentException("Too many style runs")
+        Dim copied As New StyledText(content, defaultStyle)
+        Dim output() As StyleRun
+        Dim position As Integer = 0
+        For Each run As StyleRun In runs
+            If run Is Nil Then Throw New InvalidArgumentException("Nil run")
+            If run.Start <> position Or run.Length <= 0 Or run.Length > copied.mLength - position Then Throw New InvalidArgumentException("Runs must cover content exactly")
+            Dim validated As TextStyle = CopyStyle(run.Style)
+            copied.AddRun(output, run.Length, validated)
+            position += run.Length
+        Next
+        If position <> copied.mLength Then Throw New InvalidArgumentException("Runs do not cover content")
+        copied.mRuns = output
+        Return copied
+    End Function
+
+    Public Function PlainText() As String
+        Return mText
+    End Function
+
+    Public Function Length() As Integer
+        Return mLength
+    End Function
+
+    Public Function DefaultStyle() As TextStyle
+        Return CopyTrustedStyle(mDefault)
+    End Function
+
+    Public Function Runs() As Array Of StyleRun
+        Dim copied() As StyleRun
+        For Each run As StyleRun In mRuns
+            Array.Append(copied, NewTrustedRun(run.Start, run.Length, run.Style))
+        Next
+        Return copied
+    End Function
+
+    Private Sub CheckRange(start As Integer, length As Integer)
+        If start < 0 Or start > mLength Then Throw New InvalidArgumentException("Range start out of bounds")
+        If length < 0 Or length > mLength - start Then Throw New InvalidArgumentException("Range length out of bounds")
+    End Sub
+
+    Public Function StyleAt(position As Integer) As TextStyle
+        CheckRange(position, 1)
+        For Each run As StyleRun In mRuns
+            If position >= run.Start And position < run.Start + run.Length Then Return CopyTrustedStyle(run.Style)
+        Next
+        Throw New Exception("StyledText run coverage failure")
+    End Function
+
+    Private Sub AddRun(output As Array Of StyleRun, length As Integer, style As TextStyle)
+        If style Is Nil Then Throw New InvalidArgumentException("Style must not be Nil")
+        If length = 0 Then Exit Sub
+        Dim count As Integer = Array.Count(output)
+        Dim start As Integer = 0
+        If count > 0 Then
+            Dim last As StyleRun = output(count - 1)
+            If SameStyle(last.Style, style) Then
+                last.Length += length
+                Exit Sub
+            End If
+            start = last.Start + last.Length
+        End If
+        If count >= 100000 Then Throw New InvalidArgumentException("Too many style runs")
+        Array.Append(output, NewTrustedRun(start, length, style))
+    End Sub
+
+    Private Sub AddSection(output As Array Of StyleRun, start As Integer, length As Integer)
+        If length = 0 Then Exit Sub
+        Dim finish As Integer = start + length
+        For Each run As StyleRun In mRuns
+            Dim low As Integer = run.Start
+            Dim high As Integer = run.Start + run.Length
+            If low < start Then low = start
+            If high > finish Then high = finish
+            If low < high Then AddRun(output, high - low, run.Style)
+        Next
+    End Sub
+
+    ''' Replace all attributes in the selected range; a zero length is a no-op.
+    Public Sub SetStyle(start As Integer, length As Integer, style As TextStyle)
+        CheckRange(start, length)
+        Dim snapshot As TextStyle = CopyStyle(style)
+        If length = 0 Then Exit Sub
+        Dim output() As StyleRun
+        AddSection(output, 0, start)
+        AddRun(output, length, snapshot)
+        AddSection(output, start + length, mLength - start - length)
+        mRuns = output
+    End Sub
+
+    ''' Plain insertion inherits the left character, or the right at zero, or default when empty.
+    Public Sub Insert(position As Integer, content As String)
+        Dim inheritedStyle As TextStyle
+        Insert(position, content, inheritedStyle)
+    End Sub
+
+    Public Sub Insert(position As Integer, content As String, style As TextStyle)
+        CheckRange(position, 0)
+        Dim snapshot As TextStyle
+        If style Is Nil Then
+            If mLength = 0 Then
+                snapshot = CopyTrustedStyle(mDefault)
+            ElseIf position = 0 Then
+                snapshot = StyleAt(0)
+            Else
+                snapshot = StyleAt(position - 1)
+            End If
+        Else
+            snapshot = CopyStyle(style)
+        End If
+        ValidateText(content, 4000000)
+        Dim count As Integer = String.Len(content)
+        If count > 1000000 - mLength Then Throw New InvalidArgumentException("Text exceeds one million scalars")
+        If count = 0 Then Exit Sub
+        Dim nextText As String = String.Substring(mText, 0, position) + content + String.Substring(mText, position)
+        Dim output() As StyleRun
+        AddSection(output, 0, position)
+        AddRun(output, count, snapshot)
+        AddSection(output, position, mLength - position)
+        mText = nextText
+        mLength += count
+        mRuns = output
+    End Sub
+
+    Public Sub Delete(start As Integer, length As Integer)
+        CheckRange(start, length)
+        If length = 0 Then Exit Sub
+        Dim nextText As String = String.Substring(mText, 0, start) + String.Substring(mText, start + length)
+        Dim output() As StyleRun
+        AddSection(output, 0, start)
+        AddSection(output, start + length, mLength - start - length)
+        mText = nextText
+        mLength -= length
+        mRuns = output
+    End Sub
+
+    Public Function Slice(start As Integer, length As Integer) As StyledText
+        CheckRange(start, length)
+        Dim copied As New StyledText(String.Substring(mText, start, length), mDefault)
+        Dim output() As StyleRun
+        AddSection(output, start, length)
+        copied.mRuns = output
+        Return copied
+    End Function
+End Class
+
+Private Sub WireWriteU(output As Bytes, value As Integer, width As Integer)
+    If output.Count > 16000000 - width Then Throw New InvalidArgumentException("Serialized data exceeds 16 MB")
+    If value < 0 Then Throw New InvalidArgumentException("Negative wire integer")
+    For i As Integer = width - 1 To 0 Step -1
+        Dim divisor As Integer = 1
+        For j As Integer = 1 To i
+            divisor *= 256
+        Next
+        output.Append((value \ divisor) Mod 256)
+    Next
+End Sub
+
+Private Sub WireWriteString(output As Bytes, content As String)
+    Dim data As Bytes = Bytes.FromString(content, Text.Encodings.UTF8)
+    WireWriteU(output, data.Count, 4)
+    If data.Count > 16000000 - output.Count Then Throw New InvalidArgumentException("Serialized data exceeds 16 MB")
+    output.Append(data)
+End Sub
+
+' Exact finite positive Double as a 53-bit significand and biased binary exponent.
+Private Sub WireWriteSize(output As Bytes, size As Double)
+    If size = 0.0 Then
+        WireWriteU(output, 0, 2)
+        WireWriteU(output, 0, 7)
+        Exit Sub
+    End If
+    Dim normalized As Double = size
+    Dim exponent As Integer = 0
+    While normalized < 1.0
+        normalized *= 2.0
+        exponent -= 1
+    End While
+    While normalized >= 2.0
+        normalized /= 2.0
+        exponent += 1
+    End While
+    WireWriteU(output, exponent + 1074, 2)
+    Dim significand As Integer = normalized * 4503599627370496.0
+    WireWriteU(output, significand, 7)
+End Sub
+
+Private Sub WireWriteStyle(output As Bytes, style As TextStyle)
+    Dim checked As TextStyle = CopyStyle(style)
+    WireWriteString(output, checked.FontName)
+    WireWriteSize(output, checked.FontSize)
+    Dim styleBits As Integer = 0
+    If checked.Bold Then styleBits += 1
+    If checked.Italic Then styleBits += 2
+    If checked.Underline Then styleBits += 4
+    WireWriteU(output, styleBits, 1)
+    WireWriteU(output, checked.Red, 2)
+    WireWriteU(output, checked.Green, 2)
+    WireWriteU(output, checked.Blue, 2)
+End Sub
+
+Private Class StyleWireReader
+    Private Property mData As Bytes
+    Public Property Position As Integer = 0
+
+    Public Sub Constructor(data As Bytes)
+        If data Is Nil Then Throw New InvalidArgumentException("Data must not be Nil")
+        If data.Count > 16000000 Then Throw New InvalidArgumentException("Serialized data exceeds 16 MB")
+        mData = New Bytes()
+        mData.Append(data)
+    End Sub
+
+    Public Function Count() As Integer
+        Return mData.Count
+    End Function
+
+    Public Function ReadU(width As Integer) As Integer
+        If width > mData.Count - Position Then Throw New InvalidArgumentException("Truncated style data")
+        Dim value As Integer = 0
+        For i As Integer = 1 To width
+            value = value * 256 + mData.Item(Position)
+            Position += 1
+        Next
+        Return value
+    End Function
+
+    Public Function ReadString(maxBytes As Integer) As String
+        Dim count As Integer = ReadU(4)
+        If count > maxBytes Or count > mData.Count - Position Then Throw New InvalidArgumentException("Invalid string byte count")
+        Dim data As New Bytes()
+        For i As Integer = 1 To count
+            data.Append(mData.Item(Position))
+            Position += 1
+        Next
+        ValidateUTF8(data, maxBytes)
+        Return data.ToString(Text.Encodings.UTF8)
+    End Function
+
+    Public Function ReadStyle() As TextStyle
+        Dim style As New TextStyle()
+        style.FontName = ReadString(4096)
+        Dim biased As Integer = ReadU(2)
+        Dim significand As Integer = ReadU(7)
+        If significand = 0 Then
+            If biased <> 0 Then Throw New InvalidArgumentException("Noncanonical zero size")
+        Else
+            If biased > 1093 Or significand < 4503599627370496 Or significand > 9007199254740991 Then Throw New InvalidArgumentException("Invalid font size encoding")
+            Dim size As Double = significand / 4503599627370496.0
+            Dim exponent As Integer = biased - 1074
+            While exponent < 0
+                size /= 2.0
+                exponent += 1
+            End While
+            While exponent > 0
+                size *= 2.0
+                exponent -= 1
+            End While
+            Dim canonical As New Bytes()
+            WireWriteSize(canonical, size)
+            Dim encoded As New Bytes()
+            WireWriteU(encoded, biased, 2)
+            WireWriteU(encoded, significand, 7)
+            If canonical.ToHex() <> encoded.ToHex() Then Throw New InvalidArgumentException("Noncanonical font size")
+            style.FontSize = size
+        End If
+        Dim styleBits As Integer = ReadU(1)
+        If styleBits > 7 Then Throw New InvalidArgumentException("Unknown style styleBits")
+        style.Bold = styleBits Mod 2 = 1
+        style.Italic = (styleBits \ 2) Mod 2 = 1
+        style.Underline = (styleBits \ 4) Mod 2 = 1
+        style.Red = ReadU(2)
+        style.Green = ReadU(2)
+        style.Blue = ReadU(2)
+        Return style.Copy()
+    End Function
+End Class
+
+''' Versioned binary interchange; preserves content, defaults and all supported attributes.
+Public Function EncodeStyledText(document As StyledText) As Bytes
+    If document Is Nil Then Throw New InvalidArgumentException("Document must not be Nil")
+    Dim output As Bytes = Bytes.FromString("BSTX", Text.Encodings.UTF8)
+    WireWriteU(output, 1, 1)
+    WireWriteString(output, document.PlainText())
+    WireWriteStyle(output, document.DefaultStyle())
+    Dim runs As Array Of StyleRun = document.Runs()
+    WireWriteU(output, Array.Count(runs), 4)
+    For Each run As StyleRun In runs
+        WireWriteU(output, run.Length, 4)
+        WireWriteStyle(output, run.Style)
+    Next
+    Return output
+End Function
+
+''' Strict bounded decoder: exact coverage, canonical runs, no trailing bytes.
+Public Function DecodeStyledText(data As Bytes) As StyledText
+    Dim reader As New StyleWireReader(data)
+    If reader.ReadU(4) <> 1112757336 Or reader.ReadU(1) <> 1 Then Throw New InvalidArgumentException("Unknown styled text format or version")
+    Dim content As String = reader.ReadString(4000000)
+    Dim defaultStyle As TextStyle = reader.ReadStyle()
+    Dim count As Integer = reader.ReadU(4)
+    If count > 100000 Then Throw New InvalidArgumentException("Too many style runs")
+    Dim runs() As StyleRun
+    Dim position As Integer = 0
+    Dim length As Integer = String.Len(content)
+    Dim previous As TextStyle
+    For i As Integer = 1 To count
+        Dim runLength As Integer = reader.ReadU(4)
+        Dim style As TextStyle = reader.ReadStyle()
+        If runLength = 0 Or runLength > length - position Then Throw New InvalidArgumentException("Invalid run coverage")
+        If previous <> Nil Then
+            If SameStyle(previous, style) Then Throw New InvalidArgumentException("Noncanonical adjacent style runs")
+        End If
+        Array.Append(runs, NewRun(position, runLength, style))
+        position += runLength
+        previous = style
+    Next
+    If position <> length Or reader.Position <> reader.Count() Then Throw New InvalidArgumentException("Invalid coverage or trailing style data")
+    Return StyledText.FromRuns(content, runs, defaultStyle)
+End Function
+
+Public Closure Function StylOffsetMapper(legacyOffset As Integer) As Integer
+Public Closure Function StylFontResolver(fontID As Integer) As String
+
+''' Original record retained independently of normalized, editable text.
+Public Class StylRecord
+    Public Property Start As Integer = 0
+    Public Property Height As Integer = 0
+    Public Property Ascent As Integer = 0
+    Public Property FontID As Integer = 0
+    Public Property Face As Integer = 0
+    Public Property Filler As Integer = 0
+    Public Property Size As Integer = 0
+    Public Property Red As Integer = 0
+    Public Property Green As Integer = 0
+    Public Property Blue As Integer = 0
+    Public Property MappedStart As Integer = 0
+    Public Property ResolvedFontName As String = ""
+End Class
+
+''' A detached import result; edits to Document do not rewrite the original records.
+Public Class StylImport
+    Public Property Document As StyledText
+    Public Property Records As Array Of StylRecord = []
+    Public Property Warnings As Array Of String = []
+End Class
+
+Private Function Signed16(value As Integer) As Integer
+    If value >= 32768 Then Return value - 65536
+    Return value
+End Function
+
+''' Classic big-endian Mac styl data, with explicit caller-owned offset and font mapping.
+Public Function ImportStyl(content As String, data As Bytes, mapOffset As StylOffsetMapper, resolveFont As StylFontResolver, maxRecords As Integer = 10000) As StylImport
+    If mapOffset Is Nil Or resolveFont Is Nil Then Throw New InvalidArgumentException("Import callbacks must not be Nil")
+    If maxRecords < 0 Or maxRecords > 32767 Then Throw New InvalidArgumentException("Record limit must be 0..32767")
+    Dim imported As New StylImport()
+    imported.Document = New StyledText(content)
+    Dim reader As New StyleWireReader(data)
+    Dim count As Integer = reader.ReadU(2)
+    If count > maxRecords Or count > 32767 Then Throw New InvalidArgumentException("Too many styl records")
+    If reader.Count() <> 2 + count * 20 Then Throw New InvalidArgumentException("styl length must be exactly 2 + 20 * count")
+    If count = 0 Then
+        If imported.Document.Length() <> 0 Then Throw New InvalidArgumentException("Nonempty content requires styl records")
+        Return imported
+    End If
+    If imported.Document.Length() = 0 Then Throw New InvalidArgumentException("Empty content cannot have styl records")
+    Dim previous As Integer = -1
+    ' Parse and validate all raw records before invoking external callbacks.
+    For i As Integer = 0 To count - 1
+        Dim record As New StylRecord()
+        record.Start = reader.ReadU(4)
+        If record.Start > 2147483647 Or record.Start <= previous Or (i = 0 And record.Start <> 0) Then Throw New InvalidArgumentException("styl starts must begin at zero and strictly increase")
+        previous = record.Start
+        record.Height = Signed16(reader.ReadU(2))
+        record.Ascent = Signed16(reader.ReadU(2))
+        record.FontID = Signed16(reader.ReadU(2))
+        record.Face = reader.ReadU(1)
+        record.Filler = reader.ReadU(1)
+        record.Size = Signed16(reader.ReadU(2))
+        If record.Size < 0 Then Throw New InvalidArgumentException("Negative styl font size")
+        record.Red = reader.ReadU(2)
+        record.Green = reader.ReadU(2)
+        record.Blue = reader.ReadU(2)
+        Array.Append(imported.Records, record)
+    Next
+    previous = -1
+    For i As Integer = 0 To count - 1
+        Dim record As StylRecord = imported.Records(i)
+        record.MappedStart = mapOffset(record.Start)
+        If record.MappedStart <= previous Or record.MappedStart >= imported.Document.Length() Or (i = 0 And record.MappedStart <> 0) Then Throw New InvalidArgumentException("Mapped starts must begin at zero, increase, and lie inside content")
+        previous = record.MappedStart
+    Next
+    Dim runs() As StyleRun
+    For i As Integer = 0 To count - 1
+        Dim record As StylRecord = imported.Records(i)
+        record.ResolvedFontName = resolveFont(record.FontID)
+        Dim style As New TextStyle()
+        style.FontName = record.ResolvedFontName
+        style.FontSize = record.Size
+        style.Bold = record.Face Mod 2 = 1
+        style.Italic = (record.Face \ 2) Mod 2 = 1
+        style.Underline = (record.Face \ 4) Mod 2 = 1
+        style.Red = record.Red
+        style.Green = record.Green
+        style.Blue = record.Blue
+        Dim finish As Integer = imported.Document.Length()
+        If i + 1 < count Then finish = imported.Records(i + 1).MappedStart
+        Array.Append(runs, NewRun(record.MappedStart, finish - record.MappedStart, style))
+        If record.ResolvedFontName = "" Then Array.Append(imported.Warnings, "Unresolved font ID in record " + String.From(i))
+        If record.Face >= 8 Then Array.Append(imported.Warnings, "Unsupported face bits retained in record " + String.From(i))
+        If record.Filler <> 0 Then Array.Append(imported.Warnings, "Nonzero filler retained in record " + String.From(i))
+    Next
+    imported.Document = StyledText.FromRuns(content, runs, New TextStyle())
+    Return imported
+End Function
