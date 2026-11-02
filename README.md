@@ -1,6 +1,6 @@
 # Edit and serialize portable styled Unicode text
 
-`Import styledtext` provides a portable Unicode text model with normalized style runs, editing, exact binary save/load, and a bounded importer for classic Mac `styl`/REALbasic `TextStyleData` data. It is an independent implementation, tested with the real Buoy compiler and a freshly sealed consumer.
+`Import styledtext` provides a portable Unicode text model with normalized style runs, editing, exact binary save/load, and a bounded importer for classic Mac `styl`/REALbasic `TextStyleData` data. It is an independent implementation, tested with a freshly sealed consumer.
 
 The model supports font name, fractional point size, bold, italic, underline, and RGB16 foreground color. It does not change core `TextArea`, render text, implement selection/typing UI, parse RTF, or provide paragraph layout. For native editing, [StyledTextUI](docs/API.md) embeds GTK/AppKit/Rich Edit controls with selection formatting, typing styles and undo/redo. The separate [richtext](docs/API.md) package handles macOS RTF conversion; its plain-text decoder discards formatting.
 
@@ -49,8 +49,6 @@ On your own machine, install Buoy and run:
 ```sh
 buoy ai init --both
 ```
-
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 

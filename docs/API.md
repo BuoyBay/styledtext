@@ -23,5 +23,3 @@ The importer requires a big-endian signed nonnegative Int16 count and exactly `2
 ## Save/load and verification
 
 `EncodeStyledText` / `DecodeStyledText` preserve text, defaults, run boundaries after normalization, and all supported attributes. This is a new versioned binary format, **not** RTF or `styl`. See [the wire specification](../resources/buoy-docs/api.md#binary-format-v1). Decoders reject malformed UTF-8, NUL, unknown versions/flags, invalid coverage, adjacent equal runs, truncation, and trailing bytes.
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
