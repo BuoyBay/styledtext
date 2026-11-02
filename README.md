@@ -1,4 +1,4 @@
-# Portable styled Unicode text + .styl
+# Portable styled text
 
 `Import styledtext` provides a portable Unicode text model with normalized style runs, editing, exact binary save/load, and a bounded importer for classic Mac `styl`/REALbasic `TextStyleData` data. It is an independent implementation, tested with a freshly sealed consumer.
 
