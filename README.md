@@ -1,4 +1,4 @@
-# Edit and serialize portable styled Unicode text
+# Portable styled Unicode text + .styl
 
 `Import styledtext` provides a portable Unicode text model with normalized style runs, editing, exact binary save/load, and a bounded importer for classic Mac `styl`/REALbasic `TextStyleData` data. It is an independent implementation, tested with a freshly sealed consumer.
 
@@ -17,7 +17,7 @@ consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Dim document As New StyledText("A😀é")
 Try
     Dim candidate As StyledText = document.Slice(0, document.Length())
